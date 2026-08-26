@@ -11,6 +11,7 @@
   "git": {
     "commit": true,
     "push": false,
+    "sync_before_publish": true,
     "require_clean_worktree": true,
     "remote": "origin",
     "branch": "main"

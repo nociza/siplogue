@@ -63,7 +63,7 @@ python3 {baseDir}/scripts/siplogue.py publish \
   --payload /absolute/path/to/polished-post.json
 ```
 
-The publisher strips common JPEG/PNG metadata, prepends the entry to the site's JSON collection, runs the configured validation command, commits only the collection and public image, and optionally pushes. It refuses a dirty worktree, duplicate ID or slug, path traversal, unsupported image type, and near-verbatim public body.
+The publisher can fast-forward a clean production checkout, strips common JPEG/PNG metadata, prepends the entry to the site's JSON collection, runs the configured validation command, commits only the collection and public image, and optionally pushes. It refuses a dirty or divergent worktree, duplicate ID or slug, path traversal, unsupported image type, and near-verbatim public body.
 
 7. Report the resulting status and URL. `published` means the commit was pushed. `committed` means the local commit exists but push was disabled or has not completed. Do not claim the site is live from a `written` or `committed` receipt.
 

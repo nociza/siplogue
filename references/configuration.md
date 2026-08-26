@@ -16,6 +16,7 @@ Siplogue uses one trusted JSON file to describe a Git-backed static site. Store 
   "git": {
     "commit": true,
     "push": true,
+    "sync_before_publish": true,
     "require_clean_worktree": true,
     "remote": "origin",
     "branch": "main"
@@ -33,6 +34,7 @@ Siplogue uses one trusted JSON file to describe a Git-backed static site. Store 
 - `site.validate_command`: optional argv-style command array executed from the repository root after files are written and before commit. No shell interpolation occurs.
 - `git.commit`: normally `true`. Set `false` only for a separate reviewed commit workflow.
 - `git.push`: set `true` for one-message automatic publishing. It requires `git.commit: true`.
+- `git.sync_before_publish`: set `true` for a long-lived production checkout. Siplogue fetches and fast-forwards the configured branch before it writes; divergence fails closed.
 - `git.require_clean_worktree`: keep `true` in production so a publication cannot absorb or validate against unrelated changes.
 - `git.remote` and `git.branch`: push destination. Credentials belong in the host's Git credential or SSH setup, never in this file.
 

@@ -464,6 +464,14 @@ def git(repo: Path, *arguments: str, label: str = "git") -> str:
     return run_checked(["git", *arguments], repo, label)
 
 
+def validated_remote_branch(git_config: dict[str, Any]) -> tuple[str, str]:
+    remote = git_config.get("remote", "origin")
+    branch = git_config.get("branch", "main")
+    if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._/-]+", value) for value in (remote, branch)):
+        raise SiplogueError("git remote or branch contains unsafe characters")
+    return remote, branch
+
+
 def load_config(path: Path) -> dict[str, Any]:
     config = require_mapping(load_json(path, "configuration"), "configuration")
     if config.get("schema_version") != SCHEMA_VERSION:
@@ -536,10 +544,7 @@ def command_publish(args: argparse.Namespace) -> None:
                 current_commit = git(repository, "rev-parse", "HEAD", label="commit lookup")
                 if not recorded_commit or current_commit != recorded_commit:
                     raise SiplogueError("site HEAD no longer matches the committed receipt; refusing an ambiguous retry")
-                remote = git_config.get("remote", "origin")
-                branch = git_config.get("branch", "main")
-                if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._/-]+", value) for value in (remote, branch)):
-                    raise SiplogueError("git remote or branch contains unsafe characters")
+                remote, branch = validated_remote_branch(git_config)
                 try:
                     git(repository, "push", remote, f"HEAD:{branch}", label="git push")
                 except SiplogueError as exc:
@@ -573,6 +578,14 @@ def command_publish(args: argparse.Namespace) -> None:
         if require_clean and initial_status:
             sample = "\n".join(initial_status[:10])
             raise SiplogueError(f"site worktree is not clean; refusing to mix changes:\n{sample}")
+        if git_config.get("sync_before_publish", False):
+            remote, branch = validated_remote_branch(git_config)
+            git(repository, "fetch", "--prune", remote, branch, label="git fetch")
+            git(repository, "merge", "--ff-only", "FETCH_HEAD", label="git fast-forward")
+            synchronized_status = get_worktree_status(repository)
+            if synchronized_status:
+                sample = "\n".join(synchronized_status[:10])
+                raise SiplogueError(f"site worktree changed during synchronization:\n{sample}")
 
         media_stem = media_dir / f"{payload['slug']}-{args.entry_id[-8:]}"
         # The final suffix is selected from the image bytes, not the input filename.
@@ -667,10 +680,7 @@ def command_publish(args: argparse.Namespace) -> None:
             if push_enabled:
                 if not commit_enabled:
                     raise SiplogueError("git.push requires git.commit to be enabled")
-                remote = git_config.get("remote", "origin")
-                branch = git_config.get("branch", "main")
-                if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._/-]+", value) for value in (remote, branch)):
-                    raise SiplogueError("git remote or branch contains unsafe characters")
+                remote, branch = validated_remote_branch(git_config)
                 try:
                     git(repository, "push", remote, f"HEAD:{branch}", label="git push")
                 except SiplogueError as exc:

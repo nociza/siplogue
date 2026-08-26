@@ -220,6 +220,37 @@ class SiplogueCliTest(unittest.TestCase):
         collection = json.loads((self.site / "public" / "data" / "sips.json").read_text(encoding="utf-8"))
         self.assertEqual(1, len(collection))
 
+    def test_sync_before_publish_fast_forwards_clean_checkout(self) -> None:
+        remote = self.root / "sync-remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True, text=True, capture_output=True)
+        self.run_git("remote", "add", "origin", str(remote))
+        self.run_git("push", "-q", "origin", "HEAD:main")
+
+        upstream = self.root / "upstream"
+        subprocess.run(["git", "clone", "-q", "--branch", "main", str(remote), str(upstream)], check=True, text=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Upstream Test"], cwd=upstream, check=True)
+        subprocess.run(["git", "config", "user.email", "upstream@example.invalid"], cwd=upstream, check=True)
+        (upstream / "upstream.txt").write_text("arrived before the sip\n", encoding="utf-8")
+        subprocess.run(["git", "add", "upstream.txt"], cwd=upstream, check=True)
+        subprocess.run(["git", "commit", "-qm", "Upstream change"], cwd=upstream, check=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=upstream, check=True)
+
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config["git"]["sync_before_publish"] = True
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        entry_id = str(self.capture("sync-test")["entry_id"])
+        result = json.loads(self.run_cli(
+            "publish",
+            "--config", str(self.config),
+            "--entry-id", entry_id,
+            "--payload", str(self.polished_payload()),
+        ).stdout)
+
+        self.assertEqual("committed", result["status"])
+        self.assertTrue((self.site / "upstream.txt").exists())
+        subjects = self.run_git("log", "-2", "--pretty=%s").stdout.splitlines()
+        self.assertEqual(["Publish sip: Jasmine After the First Pour", "Upstream change"], subjects)
+
 
 if __name__ == "__main__":
     unittest.main()
