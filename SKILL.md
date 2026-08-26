@@ -1,6 +1,6 @@
 ---
-name: siplogue
-description: Polish rough tea or coffee photo notes into a personal journal entry, publish the edited version to a Git-backed static website, and privately bookkeep the original message and publication receipt without a database. Use when a user sends a drink photo with tasting thoughts, asks to post or blog a cup, wants a tea/coffee log updated, or needs a prior Siplogue publication checked.
+name: sip
+description: Polish rough tea or coffee photo notes into a personal journal entry, publish the edited version to a Git-backed static website, and privately bookkeep the original message and publication receipt without a database. Use when a user sends a drink photo with tasting thoughts, asks to post or blog a cup, wants a tea/coffee log updated, or needs a prior Sip publication checked.
 license: MIT-0
 metadata:
   openclaw:
@@ -25,9 +25,9 @@ metadata:
         required: false
 ---
 
-# Siplogue
+# Sip
 
-Turn an informal photo message into a polished first-person tea or coffee journal. Publish only the edited entry; keep the original notes and source media in the private receipt store.
+Use the Siplogue publisher to turn an informal photo message into a polished first-person tea or coffee journal. Publish only the edited entry; keep the original notes and source media in the private receipt store.
 
 ## Required setup
 

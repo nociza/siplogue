@@ -1,4 +1,4 @@
 interface:
-  display_name: "Siplogue"
+  display_name: "Sip"
   short_description: "Polish photo notes into published sip journals"
-  default_prompt: "Use $siplogue to polish my tea or coffee photo notes, publish the entry, and record a private receipt."
+  default_prompt: "Use $sip to polish my tea or coffee photo notes, publish the entry, and record a private receipt."
