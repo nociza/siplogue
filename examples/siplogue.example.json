@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "site": {
+    "repository": "/srv/website",
+    "collection_file": "public/data/sips.json",
+    "media_dir": "public/images/sips",
+    "public_media_prefix": "/images/sips",
+    "entry_url_template": "https://example.com/sips/{slug}",
+    "validate_command": ["npm", "test"]
+  },
+  "git": {
+    "commit": true,
+    "push": false,
+    "require_clean_worktree": true,
+    "remote": "origin",
+    "branch": "main"
+  }
+}

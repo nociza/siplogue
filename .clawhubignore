@@ -1,0 +1,5 @@
+.github/
+tests/
+examples/
+__pycache__/
+*.py[cod]

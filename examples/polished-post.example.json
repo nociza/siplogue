@@ -1,0 +1,18 @@
+{
+  "title": "Jasmine After the First Pour",
+  "kind": "tea",
+  "excerpt": "A floral cup that traded its early brightness for a lingering peach sweetness.",
+  "body": "The first pour opened with a clean jasmine lift and a ripe-peach edge. As the cup cooled, the sweetness settled in and the fruit became rounder. At 92 °C, it felt expressive without turning sharp.",
+  "alt_text": "A brewed cup of tea beside its leaves in soft afternoon light.",
+  "observed_at": "2026-08-26T15:30:00Z",
+  "subject": {
+    "name": "Afternoon tea",
+    "style": "floral"
+  },
+  "brew": {
+    "temperature_c": 92
+  },
+  "tasting_notes": ["jasmine", "peach", "honeyed finish"],
+  "rating": 8.5,
+  "tags": ["tea", "tasting-note"]
+}
