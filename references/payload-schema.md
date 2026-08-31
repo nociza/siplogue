@@ -14,6 +14,8 @@ Write one UTF-8 JSON object. The publisher adds the internal ID, public image pa
 
 - `slug`: lowercase letters, digits, and single hyphens. When omitted, the publisher derives `YYYY-MM-DD-title`.
 - `observed_at`: ISO 8601 timestamp with timezone. Defaults to the intake timestamp.
+- `current`: boolean. Coffee defaults to `true`; tea defaults to `false`. Use an explicit value only when the user indicates a different state.
+- `setup_ids`: array of stable IDs from the configured brew setup collection. Include only setups actually used for this cup.
 - `subject`: object using only `name`, `producer`, `origin`, `variety`, `process`, and `style`.
 - `brew`: object using only `method`, `temperature_c`, `dose_g`, `water_g`, `steep_seconds`, `grind`, and `infusions`.
 - `tasting_notes`: array of up to 30 short strings.
@@ -34,6 +36,8 @@ Unknown optional fields should be omitted or represented by an empty object/arra
   "observed_at": "2026-08-26T15:30:00Z",
   "subject": {"name": "Afternoon tea", "style": "floral"},
   "brew": {"temperature_c": 92},
+  "current": true,
+  "setup_ids": ["desk-gongfu-station"],
   "tasting_notes": ["jasmine", "peach", "honeyed finish"],
   "rating": 8.5,
   "tags": ["tea", "tasting-note"]

@@ -36,6 +36,7 @@ class SiplogueCliTest(unittest.TestCase):
         self.run_git("config", "user.email", "siplogue@example.invalid")
         (self.site / "public" / "data").mkdir(parents=True)
         (self.site / "public" / "data" / "sips.json").write_text("[]\n", encoding="utf-8")
+        (self.site / "public" / "data" / "brew-setups.json").write_text("[]\n", encoding="utf-8")
         (self.site / "README.md").write_text("test site\n", encoding="utf-8")
         self.run_git("add", ".")
         self.run_git("commit", "-qm", "Initial site")
@@ -49,7 +50,12 @@ class SiplogueCliTest(unittest.TestCase):
                 "media_dir": "public/images/sips",
                 "public_media_prefix": "/images/sips",
                 "entry_url_template": "https://example.com/sips/{slug}",
-                "validate_command": [sys.executable, "-c", "import json; json.load(open('public/data/sips.json'))"],
+                "setup_collection_file": "public/data/brew-setups.json",
+                "setup_media_dir": "public/images/brew-setups",
+                "public_setup_media_prefix": "/images/brew-setups",
+                "setup_url_template": "https://example.com/sips/setups/{slug}",
+                "current_ttl_days": 14,
+                "validate_command": [sys.executable, "-c", "import json; json.load(open('public/data/sips.json')); json.load(open('public/data/brew-setups.json'))"],
             },
             "git": {
                 "commit": True,
@@ -143,6 +149,9 @@ class SiplogueCliTest(unittest.TestCase):
         self.assertNotIn(self.raw_notes, public_dump)
         self.assertNotIn("raw_notes", public_dump)
         self.assertEqual("tea", collection[0]["kind"])
+        self.assertEqual("2026-08-26T15:30:00Z", collection[0]["receivedAt"])
+        self.assertEqual({"state": "archived", "refreshedAt": None, "expiresAt": None}, collection[0]["activity"])
+        self.assertEqual([], collection[0]["setupIds"])
         public_media = self.site / "public" / collection[0]["image"]["src"].lstrip("/")
         self.assertTrue(public_media.exists())
         self.assertNotIn(b"Exif", public_media.read_bytes())
@@ -250,6 +259,81 @@ class SiplogueCliTest(unittest.TestCase):
         self.assertTrue((self.site / "upstream.txt").exists())
         subjects = self.run_git("log", "-2", "--pretty=%s").stdout.splitlines()
         self.assertEqual(["Publish sip: Jasmine After the First Pour", "Upstream change"], subjects)
+
+    def test_coffee_defaults_current_and_can_be_refreshed_or_archived(self) -> None:
+        entry_id = str(self.capture("coffee-current-test")["entry_id"])
+        payload = self.polished_payload()
+        value = json.loads(payload.read_text(encoding="utf-8"))
+        value["kind"] = "coffee"
+        value["title"] = "A Coffee in Rotation"
+        payload.write_text(json.dumps(value), encoding="utf-8")
+
+        self.run_cli("publish", "--config", str(self.config), "--entry-id", entry_id, "--payload", str(payload))
+        collection_path = self.site / "public" / "data" / "sips.json"
+        entry = json.loads(collection_path.read_text(encoding="utf-8"))[0]
+        self.assertEqual("current", entry["activity"]["state"])
+        self.assertEqual("2026-09-09T15:30:00Z", entry["activity"]["expiresAt"])
+
+        refreshed = json.loads(self.run_cli(
+            "refresh", "--config", str(self.config), entry_id,
+            "--at", "2026-09-01T12:00:00Z",
+        ).stdout)
+        self.assertEqual("2026-09-15T12:00:00Z", refreshed["activity"]["expiresAt"])
+        archived = json.loads(self.run_cli(
+            "refresh", "--config", str(self.config), entry_id,
+            "--state", "archived", "--at", "2026-09-02T12:00:00Z",
+        ).stdout)
+        self.assertEqual("archived", archived["activity"]["state"])
+        self.assertIsNone(archived["activity"]["expiresAt"])
+
+    def test_publish_and_update_brew_setup(self) -> None:
+        entry_id = str(self.capture("setup-test")["entry_id"])
+        payload = self.root / "setup.json"
+        payload.write_text(json.dumps({
+            "name": "Morning Espresso Station",
+            "summary": "A compact espresso workflow built around a small machine and hand grinder.",
+            "description": "This is the everyday counter setup for short espresso and milk drinks.",
+            "alt_text": "A compact espresso machine and hand grinder arranged on a kitchen counter.",
+            "methods": ["espresso", "americano"],
+            "tools": [
+                {"name": "Compact espresso machine", "role": "brewer"},
+                {"name": "Hand grinder", "role": "grinder", "notes": "Dialed for espresso."},
+            ],
+            "tags": ["espresso", "countertop"],
+        }), encoding="utf-8")
+        result = json.loads(self.run_cli(
+            "publish-setup", "--config", str(self.config),
+            "--entry-id", entry_id, "--payload", str(payload),
+        ).stdout)
+        self.assertEqual("morning-espresso-station", result["setup_id"])
+        setups_path = self.site / "public" / "data" / "brew-setups.json"
+        setup = json.loads(setups_path.read_text(encoding="utf-8"))[0]
+        self.assertEqual(["espresso", "americano"], setup["methods"])
+        self.assertEqual(2, len(setup["tools"]))
+        media = self.site / "public" / setup["image"]["src"].lstrip("/")
+        self.assertTrue(media.exists())
+        self.assertNotIn(b"GPS", media.read_bytes())
+
+        repeated = json.loads(self.run_cli(
+            "publish-setup", "--config", str(self.config),
+            "--entry-id", entry_id, "--payload", str(payload),
+        ).stdout)
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual("committed", repeated["status"])
+        self.assertEqual(1, len(json.loads(setups_path.read_text(encoding="utf-8"))))
+
+        update = self.root / "setup-update.json"
+        update.write_text(json.dumps({
+            "summary": "The daily espresso and Americano station.",
+            "tools": [{"name": "Compact espresso machine", "role": "brewer"}],
+        }), encoding="utf-8")
+        self.run_cli(
+            "update-setup", "--config", str(self.config), "morning-espresso-station",
+            "--payload", str(update),
+        )
+        updated = json.loads(setups_path.read_text(encoding="utf-8"))[0]
+        self.assertEqual("The daily espresso and Americano station.", updated["summary"])
+        self.assertEqual(1, len(updated["tools"]))
 
 
 if __name__ == "__main__":

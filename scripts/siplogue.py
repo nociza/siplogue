@@ -25,6 +25,9 @@ SCHEMA_VERSION = 1
 MAX_NOTES_CHARS = 20_000
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
 ALLOWED_KINDS = {"coffee", "tea"}
+DEFAULT_CURRENT_TTL_DAYS = 14
+MAX_CURRENT_TTL_DAYS = 365
+SAFE_PUBLIC_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 class SiplogueError(RuntimeError):
@@ -143,6 +146,42 @@ def validate_iso_datetime(value: str, label: str) -> str:
     if parsed.tzinfo is None:
         raise SiplogueError(f"{label} must include a timezone")
     return value
+
+
+def parse_iso_datetime(value: str, label: str) -> dt.datetime:
+    validate_iso_datetime(value, label)
+    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def add_days(value: str, days: int) -> str:
+    timestamp = parse_iso_datetime(value, "timestamp") + dt.timedelta(days=days)
+    return timestamp.astimezone(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def validate_ttl_days(value: Any, label: str = "current TTL") -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_CURRENT_TTL_DAYS:
+        raise SiplogueError(f"{label} must be an integer from 1 to {MAX_CURRENT_TTL_DAYS}")
+    return value
+
+
+def validate_public_id(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise SiplogueError(f"{label} must be a string")
+    candidate = value.strip().casefold()
+    if not SAFE_PUBLIC_ID.fullmatch(candidate) or len(candidate) > 120:
+        raise SiplogueError(f"{label} must contain lowercase letters, digits, and single hyphens")
+    return candidate
+
+
+def validate_string_list(value: Any, label: str, limit: int, item_limit: int = 120) -> list[str]:
+    if not isinstance(value, list) or len(value) > limit:
+        raise SiplogueError(f"{label} must be a list of at most {limit} strings")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        cleaned = bounded_string(item, f"{label}[{index}]", item_limit, required=True)
+        if cleaned is not None:
+            result.append(cleaned)
+    return result
 
 
 def read_notes(path_value: str) -> str:
@@ -303,11 +342,9 @@ def validate_payload(payload: Any, receipt: dict[str, Any]) -> dict[str, Any]:
     if len(slug) > 120:
         raise SiplogueError("slug exceeds 120 characters")
 
-    tags = payload.get("tags", [])
-    tasting_notes = payload.get("tasting_notes", [])
-    for value, label, limit in ((tags, "tags", 20), (tasting_notes, "tasting_notes", 30)):
-        if not isinstance(value, list) or len(value) > limit or any(not isinstance(item, str) or not item.strip() for item in value):
-            raise SiplogueError(f"{label} must be a list of at most {limit} non-empty strings")
+    tags = validate_string_list(payload.get("tags", []), "tags", 20)
+    tasting_notes = validate_string_list(payload.get("tasting_notes", []), "tasting_notes", 30)
+    setup_ids = [validate_public_id(item, "setup_ids item") for item in validate_string_list(payload.get("setup_ids", []), "setup_ids", 12)]
     subject = payload.get("subject", {})
     brew = payload.get("brew", {})
     if not isinstance(subject, dict) or not isinstance(brew, dict):
@@ -325,6 +362,9 @@ def validate_payload(payload: Any, receipt: dict[str, Any]) -> dict[str, Any]:
     rating = payload.get("rating")
     if rating is not None and (isinstance(rating, bool) or not isinstance(rating, (int, float)) or not 0 <= rating <= 10):
         raise SiplogueError("rating must be a number from 0 to 10")
+    current = payload.get("current", kind == "coffee")
+    if not isinstance(current, bool):
+        raise SiplogueError("current must be a boolean when provided")
 
     return {
         "title": title,
@@ -336,10 +376,65 @@ def validate_payload(payload: Any, receipt: dict[str, Any]) -> dict[str, Any]:
         "observed_at": observed_at,
         "subject": subject,
         "brew": brew,
-        "tasting_notes": [item.strip() for item in tasting_notes],
+        "tasting_notes": tasting_notes,
         "rating": rating,
-        "tags": [item.strip() for item in tags],
+        "tags": tags,
+        "setup_ids": setup_ids,
+        "current": current,
     }
+
+
+def validate_setup_payload(payload: Any, partial: bool = False) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise SiplogueError("brew setup payload must be a JSON object")
+    allowed = {"name", "slug", "summary", "description", "alt_text", "methods", "tools", "tags"}
+    unexpected = set(payload) - allowed
+    if unexpected:
+        raise SiplogueError(f"brew setup payload contains unsupported fields: {', '.join(sorted(unexpected))}")
+
+    result: dict[str, Any] = {}
+    text_fields = {
+        "name": (120, not partial),
+        "summary": (320, not partial),
+        "description": (12_000, not partial),
+        "alt_text": (500, not partial),
+    }
+    for key, (maximum, required) in text_fields.items():
+        if key in payload or required:
+            result[key] = bounded_string(payload.get(key), key, maximum, required=required)
+
+    if "slug" in payload:
+        result["slug"] = validate_public_id(payload["slug"], "slug")
+    elif not partial:
+        result["slug"] = slugify(result["name"] or "")
+        if not result["slug"]:
+            raise SiplogueError("name must produce a usable slug")
+
+    for key, limit in (("methods", 20), ("tags", 20)):
+        if key in payload or not partial:
+            result[key] = validate_string_list(payload.get(key, []), key, limit)
+
+    if "tools" in payload or not partial:
+        tools = payload.get("tools", [])
+        if not isinstance(tools, list) or len(tools) > 40:
+            raise SiplogueError("tools must be a list of at most 40 objects")
+        normalized_tools = []
+        for index, tool in enumerate(tools):
+            if not isinstance(tool, dict):
+                raise SiplogueError(f"tools[{index}] must be an object")
+            unexpected_tool = set(tool) - {"name", "role", "notes"}
+            if unexpected_tool:
+                raise SiplogueError(f"tools[{index}] contains unsupported fields: {', '.join(sorted(unexpected_tool))}")
+            normalized_tools.append({
+                "name": bounded_string(tool.get("name"), f"tools[{index}].name", 120, required=True),
+                "role": bounded_string(tool.get("role"), f"tools[{index}].role", 120),
+                "notes": bounded_string(tool.get("notes"), f"tools[{index}].notes", 320),
+            })
+        result["tools"] = normalized_tools
+
+    if partial and not result:
+        raise SiplogueError("brew setup update contains no supported fields")
+    return result
 
 
 def strip_jpeg_metadata(data: bytes) -> bytes:
@@ -496,9 +591,76 @@ def resolve_site(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]
     return site, git_config, repository, collection, media_dir
 
 
+def resolve_setup_site(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], Path, Path, Path]:
+    site, git_config, repository, _, _ = resolve_site(config)
+    collection = safe_repo_path(repository, site.get("setup_collection_file"), "site.setup_collection_file")
+    media_dir = safe_repo_path(repository, site.get("setup_media_dir"), "site.setup_media_dir")
+    return site, git_config, repository, collection, media_dir
+
+
 def get_worktree_status(repository: Path) -> list[str]:
     output = git(repository, "status", "--porcelain=v1", "--untracked-files=all", label="worktree check")
     return [line for line in output.splitlines() if line]
+
+
+def prepare_site_write(repository: Path, git_config: dict[str, Any]) -> None:
+    require_clean = git_config.get("require_clean_worktree", True)
+    status = get_worktree_status(repository)
+    if require_clean and status:
+        raise SiplogueError("site worktree is not clean; refusing to mix changes:\n" + "\n".join(status[:10]))
+    if git_config.get("sync_before_publish", False):
+        remote, branch = validated_remote_branch(git_config)
+        git(repository, "fetch", "--prune", remote, branch, label="git fetch")
+        git(repository, "merge", "--ff-only", "FETCH_HEAD", label="git fast-forward")
+        synchronized_status = get_worktree_status(repository)
+        if synchronized_status:
+            raise SiplogueError("site worktree changed during synchronization:\n" + "\n".join(synchronized_status[:10]))
+
+
+def run_site_validation(site: dict[str, Any], repository: Path) -> None:
+    validate_command = site.get("validate_command", [])
+    if not validate_command:
+        return
+    if not isinstance(validate_command, list) or not all(isinstance(part, str) and part for part in validate_command):
+        raise SiplogueError("site.validate_command must be an argv-style string array")
+    run_checked(validate_command, repository, "site validation")
+
+
+def finish_site_write(
+    repository: Path,
+    site: dict[str, Any],
+    git_config: dict[str, Any],
+    relative_paths: list[str],
+    commit_message: str,
+    push_override: bool | None,
+) -> dict[str, Any]:
+    run_site_validation(site, repository)
+    allowed = set(relative_paths)
+    unexpected = []
+    for line in get_worktree_status(repository):
+        changed_path = line[3:].split(" -> ")[-1]
+        if changed_path not in allowed:
+            unexpected.append(line)
+    if git_config.get("require_clean_worktree", True) and unexpected:
+        raise SiplogueError("site validation changed unexpected files:\n" + "\n".join(unexpected[:10]))
+
+    commit_enabled = bool(git_config.get("commit", True))
+    push_enabled = bool(git_config.get("push", False)) if push_override is None else push_override
+    if push_enabled and not commit_enabled:
+        raise SiplogueError("git.push requires git.commit to be enabled")
+
+    commit_sha = None
+    if commit_enabled:
+        git(repository, "add", "--", *relative_paths, label="git add")
+        git(repository, "commit", "-m", commit_message, "--", *relative_paths, label="git commit")
+        commit_sha = git(repository, "rev-parse", "HEAD", label="commit lookup")
+    if push_enabled:
+        remote, branch = validated_remote_branch(git_config)
+        git(repository, "push", remote, f"HEAD:{branch}", label="git push")
+    return {
+        "status": "published" if push_enabled else ("committed" if commit_enabled else "written"),
+        "commit_sha": commit_sha,
+    }
 
 
 def restore_file(path: Path, previous: bytes | None) -> None:
@@ -522,6 +684,23 @@ def render_entry_url(template: Any, slug: str, entry_id: str) -> str:
 def public_payload_hash(entry: dict[str, Any]) -> str:
     encoded = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def ensure_setup_references(site: dict[str, Any], repository: Path, setup_ids: list[str]) -> None:
+    if not setup_ids:
+        return
+    setup_collection = safe_repo_path(repository, site.get("setup_collection_file"), "site.setup_collection_file")
+    setups = load_json(setup_collection, "brew setup collection")
+    if not isinstance(setups, list):
+        raise SiplogueError("brew setup collection must be a JSON array")
+    known_ids = {
+        str(item.get("id"))
+        for item in setups
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    missing = sorted(set(setup_ids) - known_ids)
+    if missing:
+        raise SiplogueError(f"unknown brew setup IDs: {', '.join(missing)}")
 
 
 def command_publish(args: argparse.Namespace) -> None:
@@ -569,6 +748,7 @@ def command_publish(args: argparse.Namespace) -> None:
             return
         payload_value = load_json(Path(args.payload).expanduser(), "public payload")
         payload = validate_payload(payload_value, receipt)
+        ensure_setup_references(site, repository, payload["setup_ids"])
         original = Path(receipt["intake"]["media"]["private_path"])
         if not original.is_file() or sha256_file(original) != receipt["intake"]["media"]["sha256"]:
             raise SiplogueError("private original is missing or does not match its recorded hash")
@@ -602,6 +782,13 @@ def command_publish(args: argparse.Namespace) -> None:
         try:
             destination = sanitize_image(original, media_stem)
             published_at = utc_now()
+            received_at = receipt["intake"]["captured_at"]
+            ttl_days = validate_ttl_days(site.get("current_ttl_days", DEFAULT_CURRENT_TTL_DAYS))
+            activity = {
+                "state": "current" if payload["current"] else "archived",
+                "refreshedAt": received_at if payload["current"] else None,
+                "expiresAt": add_days(received_at, ttl_days) if payload["current"] else None,
+            }
             public_entry = {
                 "id": args.entry_id,
                 "slug": payload["slug"],
@@ -614,12 +801,15 @@ def command_publish(args: argparse.Namespace) -> None:
                     "alt": payload["alt_text"],
                 },
                 "observedAt": payload["observed_at"],
+                "receivedAt": received_at,
                 "publishedAt": published_at,
                 "subject": payload["subject"],
                 "brew": payload["brew"],
                 "tastingNotes": payload["tasting_notes"],
                 "rating": payload["rating"],
                 "tags": payload["tags"],
+                "setupIds": payload["setup_ids"],
+                "activity": activity,
             }
             if collection_path.exists():
                 collection = load_json(collection_path, "site collection")
@@ -718,6 +908,274 @@ def command_publish(args: argparse.Namespace) -> None:
             raise
 
 
+def command_refresh(args: argparse.Namespace) -> None:
+    config = load_config(Path(args.config).expanduser())
+    site, git_config, repository, collection_path, _ = resolve_site(config)
+    prepare_site_write(repository, git_config)
+    collection = load_json(collection_path, "site collection")
+    if not isinstance(collection, list):
+        raise SiplogueError("site collection must be a JSON array")
+    matches = [item for item in collection if isinstance(item, dict) and args.entry in {item.get("id"), item.get("slug")}]
+    if len(matches) != 1:
+        raise SiplogueError("sip entry was not found" if not matches else "sip entry identifier is ambiguous")
+
+    refreshed_at = validate_iso_datetime(args.at, "at") if args.at else utc_now()
+    ttl_days = validate_ttl_days(args.days if args.days is not None else site.get("current_ttl_days", DEFAULT_CURRENT_TTL_DAYS))
+    activity = {
+        "state": args.state,
+        "refreshedAt": refreshed_at if args.state == "current" else None,
+        "expiresAt": add_days(refreshed_at, ttl_days) if args.state == "current" else None,
+    }
+    target = matches[0]
+    target["activity"] = activity
+    previous = collection_path.read_bytes()
+    relative_collection = str(collection_path.relative_to(repository))
+    try:
+        atomic_write_json(collection_path, collection, mode=0o644, parent_mode=0o755)
+        title = re.sub(r"[\r\n]+", " ", str(target.get("title", args.entry))).strip()[:60]
+        outcome = finish_site_write(
+            repository,
+            site,
+            git_config,
+            [relative_collection],
+            f"Update sip activity: {title}",
+            args.push,
+        )
+    except Exception:
+        if get_worktree_status(repository):
+            subprocess.run(["git", "restore", "--staged", "--", relative_collection], cwd=repository, check=False, capture_output=True, text=True)
+            restore_file(collection_path, previous)
+        raise
+    json_output({"entry_id": target.get("id"), "activity": activity, **outcome})
+
+
+def command_publish_setup(args: argparse.Namespace) -> None:
+    config = load_config(Path(args.config).expanduser())
+    site, git_config, repository, collection_path, media_dir = resolve_setup_site(config)
+    state_arg = Path(args.state_dir).expanduser().resolve()
+    if state_arg.is_relative_to(repository):
+        raise SiplogueError("private state directory must not be inside the public site repository")
+
+    with StateLock(state_arg) as state_dir:
+        target_receipt = receipt_path(state_dir, args.entry_id)
+        receipt = require_mapping(load_json(target_receipt, "receipt"), "receipt")
+        push_enabled = bool(git_config.get("push", False)) if args.push is None else args.push
+        if receipt.get("status") in {"published", "written"}:
+            json_output({
+                "entry_id": args.entry_id,
+                "setup_id": (receipt.get("public_payload") or {}).get("id"),
+                "status": receipt.get("status"),
+                "publication": receipt.get("publication"),
+                "idempotent": True,
+            })
+            return
+        if receipt.get("status") == "committed":
+            publication = receipt.get("publication") or {}
+            if publication.get("kind") != "brew-setup":
+                raise SiplogueError("receipt contains a different kind of committed publication")
+            if push_enabled:
+                recorded_commit = publication.get("commit_sha")
+                current_commit = git(repository, "rev-parse", "HEAD", label="commit lookup")
+                if not recorded_commit or current_commit != recorded_commit:
+                    raise SiplogueError("site HEAD no longer matches the committed receipt; refusing an ambiguous retry")
+                remote, branch = validated_remote_branch(git_config)
+                try:
+                    git(repository, "push", remote, f"HEAD:{branch}", label="git push")
+                except SiplogueError as exc:
+                    receipt["last_error"] = str(exc)
+                    receipt["updated_at"] = utc_now()
+                    atomic_write_json(target_receipt, receipt)
+                    append_event(state_dir, args.entry_id, "setup_push_failed", error=str(exc))
+                    raise
+                receipt["status"] = "published"
+                receipt["publication"]["published_at"] = utc_now()
+                receipt["updated_at"] = utc_now()
+                receipt["last_error"] = None
+                atomic_write_json(target_receipt, receipt)
+                append_event(
+                    state_dir,
+                    args.entry_id,
+                    "setup_published",
+                    setup_id=(receipt.get("public_payload") or {}).get("id"),
+                    url=publication.get("url"),
+                )
+            json_output({
+                "entry_id": args.entry_id,
+                "setup_id": (receipt.get("public_payload") or {}).get("id"),
+                "status": receipt.get("status"),
+                "publication": receipt.get("publication"),
+                "idempotent": True,
+            })
+            return
+        payload = validate_setup_payload(load_json(Path(args.payload).expanduser(), "brew setup payload"))
+        original = Path(receipt["intake"]["media"]["private_path"])
+        if not original.is_file() or sha256_file(original) != receipt["intake"]["media"]["sha256"]:
+            raise SiplogueError("private original is missing or does not match its recorded hash")
+
+        prepare_site_write(repository, git_config)
+        collection = load_json(collection_path, "brew setup collection") if collection_path.exists() else []
+        if not isinstance(collection, list):
+            raise SiplogueError("brew setup collection must be a JSON array")
+        existing = next((item for item in collection if isinstance(item, dict) and payload["slug"] in {item.get("id"), item.get("slug")}), None)
+        if not existing and any(isinstance(item, dict) and item.get("slug") == payload["slug"] for item in collection):
+            raise SiplogueError("brew setup slug is duplicated")
+
+        media_prefix = site.get("public_setup_media_prefix")
+        if not isinstance(media_prefix, str) or not media_prefix.startswith("/"):
+            raise SiplogueError("site.public_setup_media_prefix must start with '/'")
+        media_stem = media_dir / f"{payload['slug']}-{args.entry_id[-8:]}"
+        if any(media_stem.with_suffix(suffix).exists() for suffix in (".jpg", ".png")):
+            raise SiplogueError("public setup media destination already exists")
+
+        previous_collection = collection_path.read_bytes() if collection_path.exists() else None
+        destination: Path | None = None
+        relative_collection = str(collection_path.relative_to(repository))
+        relative_media: str | None = None
+        committed = False
+        try:
+            destination = sanitize_image(original, media_stem)
+            now = utc_now()
+            public_setup = {
+                "id": existing.get("id") if existing else payload["slug"],
+                "slug": payload["slug"],
+                "name": payload["name"],
+                "summary": payload["summary"],
+                "description": payload["description"],
+                "image": {"src": f"{media_prefix.rstrip('/')}/{destination.name}", "alt": payload["alt_text"]},
+                "methods": payload["methods"],
+                "tools": payload["tools"],
+                "tags": payload["tags"],
+                "receivedAt": receipt["intake"]["captured_at"],
+                "publishedAt": existing.get("publishedAt", now) if existing else now,
+                "updatedAt": now,
+            }
+            if existing:
+                collection[collection.index(existing)] = public_setup
+            else:
+                collection.insert(0, public_setup)
+            atomic_write_json(collection_path, collection, mode=0o644, parent_mode=0o755)
+            relative_media = str(destination.relative_to(repository))
+            run_site_validation(site, repository)
+            allowed = {relative_collection, relative_media}
+            unexpected = []
+            for line in get_worktree_status(repository):
+                changed_path = line[3:].split(" -> ")[-1]
+                if changed_path not in allowed:
+                    unexpected.append(line)
+            if git_config.get("require_clean_worktree", True) and unexpected:
+                raise SiplogueError("site validation changed unexpected files:\n" + "\n".join(unexpected[:10]))
+
+            commit_enabled = bool(git_config.get("commit", True))
+            if push_enabled and not commit_enabled:
+                raise SiplogueError("git.push requires git.commit to be enabled")
+            commit_sha = None
+            if commit_enabled:
+                git(repository, "add", "--", relative_collection, relative_media, label="git add")
+                git(
+                    repository,
+                    "commit",
+                    "-m",
+                    f"Publish brew setup: {payload['name'][:72]}",
+                    "--",
+                    relative_collection,
+                    relative_media,
+                    label="git commit",
+                )
+                committed = True
+                commit_sha = git(repository, "rev-parse", "HEAD", label="commit lookup")
+            url = render_entry_url(site.get("setup_url_template"), public_setup["slug"], public_setup["id"])
+            receipt["status"] = "committed" if commit_enabled else "written"
+            receipt["updated_at"] = utc_now()
+            receipt["public_payload"] = public_setup
+            receipt["publication"] = {
+                "kind": "brew-setup",
+                "repository": str(repository),
+                "collection_path": relative_collection,
+                "media_path": relative_media,
+                "url": url,
+                "commit_sha": commit_sha,
+                "payload_sha256": public_payload_hash(public_setup),
+                "committed_at": utc_now() if commit_enabled else None,
+                "published_at": None,
+            }
+            receipt["last_error"] = None
+            atomic_write_json(target_receipt, receipt)
+            append_event(state_dir, args.entry_id, f"setup_{receipt['status']}", setup_id=public_setup["id"], url=url)
+
+            if push_enabled:
+                remote, branch = validated_remote_branch(git_config)
+                try:
+                    git(repository, "push", remote, f"HEAD:{branch}", label="git push")
+                except SiplogueError as exc:
+                    receipt["last_error"] = str(exc)
+                    receipt["updated_at"] = utc_now()
+                    atomic_write_json(target_receipt, receipt)
+                    append_event(state_dir, args.entry_id, "setup_push_failed", error=str(exc))
+                    raise
+                receipt["status"] = "published"
+                receipt["publication"]["published_at"] = utc_now()
+                receipt["updated_at"] = utc_now()
+                atomic_write_json(target_receipt, receipt)
+                append_event(state_dir, args.entry_id, "setup_published", setup_id=public_setup["id"], url=url)
+        except Exception as exc:
+            if not committed:
+                staged_paths = [relative_collection]
+                if relative_media:
+                    staged_paths.append(relative_media)
+                subprocess.run(["git", "restore", "--staged", "--", *staged_paths], cwd=repository, check=False, capture_output=True, text=True)
+                restore_file(collection_path, previous_collection)
+                if destination and destination.exists():
+                    destination.unlink()
+                receipt["last_error"] = str(exc)
+                receipt["updated_at"] = utc_now()
+                atomic_write_json(target_receipt, receipt)
+                append_event(state_dir, args.entry_id, "setup_publish_failed", error=str(exc))
+            raise
+        json_output({
+            "entry_id": args.entry_id,
+            "setup_id": public_setup["id"],
+            "status": receipt["status"],
+            "publication": receipt["publication"],
+            "idempotent": False,
+        })
+
+
+def command_update_setup(args: argparse.Namespace) -> None:
+    config = load_config(Path(args.config).expanduser())
+    site, git_config, repository, collection_path, _ = resolve_setup_site(config)
+    prepare_site_write(repository, git_config)
+    collection = load_json(collection_path, "brew setup collection")
+    if not isinstance(collection, list):
+        raise SiplogueError("brew setup collection must be a JSON array")
+    matches = [item for item in collection if isinstance(item, dict) and args.setup in {item.get("id"), item.get("slug")}]
+    if len(matches) != 1:
+        raise SiplogueError("brew setup was not found" if not matches else "brew setup identifier is ambiguous")
+    changes = validate_setup_payload(load_json(Path(args.payload).expanduser(), "brew setup update"), partial=True)
+    target = matches[0]
+    if "slug" in changes and any(item is not target and isinstance(item, dict) and item.get("slug") == changes["slug"] for item in collection):
+        raise SiplogueError("brew setup slug is already in use")
+    target.update(changes)
+    target["updatedAt"] = utc_now()
+    previous = collection_path.read_bytes()
+    relative_collection = str(collection_path.relative_to(repository))
+    try:
+        atomic_write_json(collection_path, collection, mode=0o644, parent_mode=0o755)
+        outcome = finish_site_write(
+            repository,
+            site,
+            git_config,
+            [relative_collection],
+            f"Update brew setup: {str(target.get('name', args.setup))[:72]}",
+            args.push,
+        )
+    except Exception:
+        if get_worktree_status(repository):
+            subprocess.run(["git", "restore", "--staged", "--", relative_collection], cwd=repository, check=False, capture_output=True, text=True)
+            restore_file(collection_path, previous)
+        raise
+    json_output({"setup_id": target.get("id"), "slug": target.get("slug"), **outcome})
+
+
 def redact_receipt(receipt: dict[str, Any], include_private: bool) -> dict[str, Any]:
     result = json.loads(json.dumps(receipt))
     if not include_private:
@@ -772,7 +1230,21 @@ def command_doctor(args: argparse.Namespace) -> None:
         "state_dir": str(state_dir),
         "git_status": status,
         "entry_url_template": site.get("entry_url_template"),
+        "current_ttl_days": site.get("current_ttl_days", DEFAULT_CURRENT_TTL_DAYS),
     }
+    setup_fields = ("setup_collection_file", "setup_media_dir", "public_setup_media_prefix", "setup_url_template")
+    configured_setup_fields = [field for field in setup_fields if site.get(field)]
+    if configured_setup_fields:
+        missing_setup_fields = [field for field in setup_fields if not site.get(field)]
+        if missing_setup_fields:
+            problems.append("brew setup configuration is incomplete: " + ", ".join(missing_setup_fields))
+        else:
+            _, _, _, setup_collection, setup_media_dir = resolve_setup_site(config)
+            result["setup_collection"] = str(setup_collection)
+            result["setup_media_dir"] = str(setup_media_dir)
+            result["setup_url_template"] = site.get("setup_url_template")
+    result["ok"] = not problems
+    result["problems"] = problems
     json_output(result)
     if problems:
         raise SiplogueError("doctor found configuration problems")
@@ -802,6 +1274,44 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--payload", required=True, help="JSON file containing polished public fields")
     publish.add_argument("--push", action=argparse.BooleanOptionalAction, default=None, help="override git.push")
     publish.set_defaults(function=command_publish)
+
+    refresh = subparsers.add_parser("refresh", help="renew or archive a sip's current-drinking window")
+    refresh.add_argument(
+        "--config",
+        default=os.environ.get("SIPLOGUE_CONFIG"),
+        required=not bool(os.environ.get("SIPLOGUE_CONFIG")),
+        help="site configuration JSON; defaults to SIPLOGUE_CONFIG",
+    )
+    refresh.add_argument("entry", help="sip entry ID or slug")
+    refresh.add_argument("--state", choices=("current", "archived"), default="current")
+    refresh.add_argument("--at", help="ISO 8601 refresh timestamp; defaults to now")
+    refresh.add_argument("--days", type=int, help="current window in days; defaults to site.current_ttl_days")
+    refresh.add_argument("--push", action=argparse.BooleanOptionalAction, default=None, help="override git.push")
+    refresh.set_defaults(function=command_refresh)
+
+    publish_setup = subparsers.add_parser("publish-setup", help="publish or replace a photographed brew setup")
+    publish_setup.add_argument(
+        "--config",
+        default=os.environ.get("SIPLOGUE_CONFIG"),
+        required=not bool(os.environ.get("SIPLOGUE_CONFIG")),
+        help="site configuration JSON; defaults to SIPLOGUE_CONFIG",
+    )
+    publish_setup.add_argument("--entry-id", required=True)
+    publish_setup.add_argument("--payload", required=True, help="JSON file containing the public brew setup")
+    publish_setup.add_argument("--push", action=argparse.BooleanOptionalAction, default=None, help="override git.push")
+    publish_setup.set_defaults(function=command_publish_setup)
+
+    update_setup = subparsers.add_parser("update-setup", help="update brew setup methods, tools, or copy without replacing its photo")
+    update_setup.add_argument(
+        "--config",
+        default=os.environ.get("SIPLOGUE_CONFIG"),
+        required=not bool(os.environ.get("SIPLOGUE_CONFIG")),
+        help="site configuration JSON; defaults to SIPLOGUE_CONFIG",
+    )
+    update_setup.add_argument("setup", help="brew setup ID or slug")
+    update_setup.add_argument("--payload", required=True, help="JSON file containing fields to update")
+    update_setup.add_argument("--push", action=argparse.BooleanOptionalAction, default=None, help="override git.push")
+    update_setup.set_defaults(function=command_update_setup)
 
     show = subparsers.add_parser("show", help="show one receipt; private fields are redacted by default")
     show.add_argument("entry_id")

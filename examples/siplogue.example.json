@@ -6,6 +6,11 @@
     "media_dir": "public/images/sips",
     "public_media_prefix": "/images/sips",
     "entry_url_template": "https://example.com/sips/{slug}",
+    "setup_collection_file": "public/data/brew-setups.json",
+    "setup_media_dir": "public/images/brew-setups",
+    "public_setup_media_prefix": "/images/brew-setups",
+    "setup_url_template": "https://example.com/sips/setups/{slug}",
+    "current_ttl_days": 14,
     "validate_command": ["npm", "test"]
   },
   "git": {

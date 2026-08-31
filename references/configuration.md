@@ -11,6 +11,11 @@ Siplogue uses one trusted JSON file to describe a Git-backed static site. Store 
     "media_dir": "public/images/sips",
     "public_media_prefix": "/images/sips",
     "entry_url_template": "https://example.com/sips/{slug}",
+    "setup_collection_file": "public/data/brew-setups.json",
+    "setup_media_dir": "public/images/brew-setups",
+    "public_setup_media_prefix": "/images/brew-setups",
+    "setup_url_template": "https://example.com/sips/setups/{slug}",
+    "current_ttl_days": 14,
     "validate_command": ["npm", "test"]
   },
   "git": {
@@ -31,6 +36,11 @@ Siplogue uses one trusted JSON file to describe a Git-backed static site. Store 
 - `site.media_dir`: repository-relative directory for sanitized public images.
 - `site.public_media_prefix`: root-relative URL corresponding to `media_dir`.
 - `site.entry_url_template`: absolute HTTP(S) URL. It may contain `{slug}` and `{id}`.
+- `site.setup_collection_file`: repository-relative JSON array containing public brew setups.
+- `site.setup_media_dir`: repository-relative directory for sanitized setup photographs.
+- `site.public_setup_media_prefix`: root-relative URL corresponding to `setup_media_dir`.
+- `site.setup_url_template`: absolute HTTP(S) setup URL. It may contain `{slug}` and `{id}`.
+- `site.current_ttl_days`: optional current-drinking window from 1 to 365 days. Defaults to 14.
 - `site.validate_command`: optional argv-style command array executed from the repository root after files are written and before commit. No shell interpolation occurs.
 - `git.commit`: normally `true`. Set `false` only for a separate reviewed commit workflow.
 - `git.push`: set `true` for one-message automatic publishing. It requires `git.commit: true`.
@@ -38,7 +48,9 @@ Siplogue uses one trusted JSON file to describe a Git-backed static site. Store 
 - `git.require_clean_worktree`: keep `true` in production so a publication cannot absorb or validate against unrelated changes.
 - `git.remote` and `git.branch`: push destination. Credentials belong in the host's Git credential or SSH setup, never in this file.
 
-Run `doctor` after configuration and after moving the website checkout. A healthy automatic setup reports `"ok": true`, an empty `git_status`, and the intended repository, collection, media, and URL template.
+The four setup fields are optional as a group for older Sip-only sites. Configure all four to enable the brew-setup shelf; partial setup configuration fails `doctor`.
+
+Run `doctor` after configuration and after moving the website checkout. A healthy automatic setup reports `"ok": true`, an empty `git_status`, the intended sip and setup paths, and both URL templates.
 
 ## Private state
 

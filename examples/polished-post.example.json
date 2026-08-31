@@ -12,6 +12,8 @@
   "brew": {
     "temperature_c": 92
   },
+  "current": true,
+  "setup_ids": ["desk-gongfu-station"],
   "tasting_notes": ["jasmine", "peach", "honeyed finish"],
   "rating": 8.5,
   "tags": ["tea", "tasting-note"]

@@ -1,4 +1,4 @@
 interface:
   display_name: "Sip"
-  short_description: "Polish photo notes into published sip journals"
-  default_prompt: "Use $sip to polish my tea or coffee photo notes, publish the entry, and record a private receipt."
+  short_description: "Publish cups and manage brew setups"
+  default_prompt: "Use $sip to publish this cup or brew setup, update its rotation status, and keep a private receipt."
